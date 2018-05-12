@@ -24,7 +24,7 @@ $ vault read custodian/wallets/wallet1
 Address: 0x...
 ```
 
-Next, create a credential to use the wallet. A credential issues a [lease]() token which can be used to make transactions with the wallet.
+Next, create a credential to use the wallet. A credential issues a [lease](https://www.vaultproject.io/docs/concepts/lease.html) token which can be used to make transactions with the wallet.
 
 ```
 $ vault read custodian/creds/wallet1
