@@ -51,7 +51,7 @@ It will return the hash of the transaction.
 At any time, it is possible to revoke the lease token by running:
 
 ```
-$ vault lease custodian/creds/wallet1/314a5d41-7316-03bb-0168-cf45c1396a69
+$ vault token revoke custodian/creds/wallet1/314a5d41-7316-03bb-0168-cf45c1396a69
 ```
 
 After that, it will not be possible to use the key anymore to make transactions.
