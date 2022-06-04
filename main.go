@@ -1,26 +1,30 @@
 package main
 
 import (
-	"log"
 	"os"
 
-	"github.com/ferranbt/custodian/custodian"
-	"github.com/hashicorp/vault/helper/pluginutil"
-	"github.com/hashicorp/vault/logical/plugin"
+	hclog "github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/vault/api"
+	"github.com/hashicorp/vault/sdk/plugin"
+	"github.com/umbracle/custodian/custodian"
 )
 
 func main() {
-	apiClientMeta := &pluginutil.APIClientMeta{}
+	apiClientMeta := &api.PluginAPIClientMeta{}
 	flags := apiClientMeta.FlagSet()
 	flags.Parse(os.Args[1:])
 
 	tlsConfig := apiClientMeta.GetTLSConfig()
-	tlsProviderFunc := pluginutil.VaultPluginTLSProvider(tlsConfig)
+	tlsProviderFunc := api.VaultPluginTLSProvider(tlsConfig)
 
-	if err := plugin.Serve(&plugin.ServeOpts{
+	err := plugin.Serve(&plugin.ServeOpts{
 		BackendFactoryFunc: custodian.Factory,
 		TLSProviderFunc:    tlsProviderFunc,
-	}); err != nil {
-		log.Fatal(err)
+	})
+	if err != nil {
+		logger := hclog.New(&hclog.LoggerOptions{})
+
+		logger.Error("plugin shutting down", "error", err)
+		os.Exit(1)
 	}
 }
