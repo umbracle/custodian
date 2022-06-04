@@ -6,41 +6,45 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/ethereum/go-ethereum/accounts/keystore"
-	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/hashicorp/vault/logical"
-	"github.com/hashicorp/vault/logical/framework"
+	"github.com/umbracle/ethgo/keystore"
+	"github.com/umbracle/ethgo/wallet"
+
+	"github.com/hashicorp/vault/sdk/framework"
+	"github.com/hashicorp/vault/sdk/logical"
 )
 
-type wallet struct {
+type walletEntry struct {
 	Address    string `mapstructure:"address" json:"address"`
 	PrivateKey string `mapstructure:"private_key" json:"private_key"`
 	Endpoint   string `mapstructure:"endpoint" json:"endpoint"`
 }
 
-func (w *wallet) GetPrivateKey() (*ecdsa.PrivateKey, error) {
+func (w *walletEntry) GetPrivateKey() (*ecdsa.PrivateKey, error) {
 	res1, err := hex.DecodeString(w.PrivateKey)
 	if err != nil {
 		return nil, err
 	}
-
-	return crypto.ToECDSA(res1)
+	priv, err := wallet.ParsePrivateKey(res1)
+	if err != nil {
+		return nil, err
+	}
+	return priv, nil
 }
 
 func pathWallets(b *backend) *framework.Path {
 	return &framework.Path{
 		Pattern: "wallets/" + framework.GenericNameRegex("wallet"),
 		Fields: map[string]*framework.FieldSchema{
-			"endpoint": &framework.FieldSchema{
+			"endpoint": {
 				Type: framework.TypeString,
 			},
-			"wallet": &framework.FieldSchema{
+			"wallet": {
 				Type: framework.TypeString,
 			},
-			"keystore": &framework.FieldSchema{
+			"keystore": {
 				Type: framework.TypeString,
 			},
-			"passphrase": &framework.FieldSchema{
+			"passphrase": {
 				Type: framework.TypeString,
 			},
 		},
@@ -54,29 +58,33 @@ func pathWallets(b *backend) *framework.Path {
 	}
 }
 
-func keyToWallet(key *ecdsa.PrivateKey) *wallet {
-	return &wallet{
-		Address:    crypto.PubkeyToAddress(key.PublicKey).String(),
-		PrivateKey: hex.EncodeToString(crypto.FromECDSA(key)),
+func keyToWallet(key *wallet.Key) *walletEntry {
+	priv, _ := key.MarshallPrivateKey()
+
+	return &walletEntry{
+		Address:    key.Address().String(),
+		PrivateKey: hex.EncodeToString(priv),
 	}
 }
 
-func createWallet(d *framework.FieldData) (*wallet, error) {
-	key, err := crypto.GenerateKey()
+func createWallet(d *framework.FieldData) (*walletEntry, error) {
+	key, err := wallet.GenerateKey()
 	if err != nil {
 		return nil, err
 	}
-
 	return keyToWallet(key), nil
 }
 
-func keystoreWallet(d *framework.FieldData) (*wallet, error) {
-	key, err := keystore.DecryptKey([]byte(d.Get("keystore").(string)), d.Get("passphrase").(string))
+func keystoreWallet(d *framework.FieldData) (*walletEntry, error) {
+	privKey, err := keystore.DecryptV3([]byte(d.Get("keystore").(string)), d.Get("passphrase").(string))
 	if err != nil {
 		return nil, err
 	}
-
-	return keyToWallet(key.PrivateKey), nil
+	key, err := wallet.NewWalletFromPrivKey(privKey)
+	if err != nil {
+		return nil, err
+	}
+	return keyToWallet(key), nil
 }
 
 func (b *backend) pathWalletsWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
@@ -90,7 +98,7 @@ func (b *backend) pathWalletsWrite(ctx context.Context, req *logical.Request, d 
 		return logical.ErrorResponse("missing RPC endpoint"), nil
 	}
 
-	var fn func(d *framework.FieldData) (*wallet, error)
+	var fn func(d *framework.FieldData) (*walletEntry, error)
 	if _, ok := d.GetOk("keystore"); ok {
 		fn = keystoreWallet
 	} else {
@@ -131,7 +139,7 @@ func (b *backend) pathWalletsRead(ctx context.Context, req *logical.Request, d *
 	}, nil
 }
 
-func (b *backend) getWallet(ctx context.Context, s logical.Storage, n string) (*wallet, error) {
+func (b *backend) getWallet(ctx context.Context, s logical.Storage, n string) (*walletEntry, error) {
 	entry, err := s.Get(ctx, "wallets/"+n)
 	if err != nil {
 		return nil, err
@@ -140,7 +148,7 @@ func (b *backend) getWallet(ctx context.Context, s logical.Storage, n string) (*
 		return nil, nil
 	}
 
-	var result wallet
+	var result walletEntry
 	if err := entry.DecodeJSON(&result); err != nil {
 		return nil, err
 	}

@@ -6,26 +6,22 @@ import (
 	"fmt"
 	"math/big"
 
-	ethereum "github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/umbracle/ethgo"
+	"github.com/umbracle/ethgo/jsonrpc"
+	"github.com/umbracle/ethgo/wallet"
 
-	"github.com/hashicorp/vault/logical"
-	"github.com/hashicorp/vault/logical/framework"
-
-	rpc "github.com/ethereum/go-ethereum/rpc"
+	"github.com/hashicorp/vault/sdk/framework"
+	"github.com/hashicorp/vault/sdk/logical"
 )
 
 func pathTransactions(b *backend) *framework.Path {
 	return &framework.Path{
 		Pattern: "transaction",
 		Fields: map[string]*framework.FieldSchema{
-			"data": &framework.FieldSchema{
+			"data": {
 				Type: framework.TypeString,
 			},
-			"id": &framework.FieldSchema{
+			"id": {
 				Type: framework.TypeString,
 			},
 		},
@@ -39,24 +35,23 @@ func pathTransactions(b *backend) *framework.Path {
 }
 
 type Transaction struct {
-	To           *common.Address
+	To           *ethgo.Address
 	Nonce        uint64
 	NoncePending uint64
-	GasPrice     *big.Int
+	GasPrice     uint64
 	GasLimit     uint64
 	Value        *big.Int
 	Data         []byte
 }
 
 func UnmarshalTx(data []byte) (*Transaction, error) {
-
 	type transaction struct {
-		To       *common.Address `json:"to"`
+		To       *ethgo.Address  `json:"to"`
 		Nonce    uint64          `json:"nonce"`
-		GasPrice *hexutil.Big    `json:"gasPrice"`
+		GasPrice *ethgo.ArgBig   `json:"gasPrice"`
 		GasLimit uint64          `json:"gas"`
-		Value    *hexutil.Big    `json:"value"`
-		Data     *hexutil.Bytes  `json:"data"`
+		Value    *ethgo.ArgBig   `json:"value"`
+		Data     *ethgo.ArgBytes `json:"data"`
 	}
 
 	var res transaction
@@ -67,10 +62,14 @@ func UnmarshalTx(data []byte) (*Transaction, error) {
 	tx := &Transaction{
 		To:       res.To,
 		Nonce:    res.Nonce,
-		GasPrice: res.GasPrice.ToInt(),
 		GasLimit: res.GasLimit,
-		Value:    res.Value.ToInt(),
 		Data:     []byte{},
+	}
+	if res.GasPrice != nil {
+		tx.GasPrice = (*big.Int)(res.GasPrice).Uint64()
+	}
+	if res.Value != nil {
+		tx.Value = (*big.Int)(res.Value)
 	}
 
 	if res.Data != nil {
@@ -94,7 +93,7 @@ func (b *backend) pathTransactionsWrite(ctx context.Context, req *logical.Reques
 		return nil, err
 	}
 	if cred == nil {
-		return nil, fmt.Errorf("Key not found")
+		return nil, fmt.Errorf("key not found")
 	}
 
 	wallet, err := b.getWallet(ctx, req.Storage, cred.Wallet)
@@ -119,60 +118,73 @@ func (b *backend) pathTransactionsWrite(ctx context.Context, req *logical.Reques
 	}, nil
 }
 
-func (b *backend) send(wallet *wallet, tx *Transaction) (string, error) {
+func (b *backend) send(entry *walletEntry, tx *Transaction) (string, error) {
 	b.txMutex.Lock()
 	defer b.txMutex.Unlock()
 
-	var err error
-	client, err := rpc.Dial(wallet.Endpoint)
+	client, err := jsonrpc.NewClient(entry.Endpoint)
 	if err != nil {
 		return "", err
 	}
 
-	ethClient := ethclient.NewClient(client)
-
-	privateKey, err := wallet.GetPrivateKey()
+	privateKey, err := entry.GetPrivateKey()
 	if err != nil {
 		return "", err
 	}
+	key := wallet.NewKey(privateKey)
 
-	from := common.HexToAddress(wallet.Address)
+	from := ethgo.HexToAddress(entry.Address)
 
-	ctx := context.Background()
+	// chainid
+	chainID, err := client.Eth().ChainID()
+	if err != nil {
+		return "", err
+	}
 
 	// Nonce
-	tx.Nonce, err = ethClient.NonceAt(ctx, from, nil)
+	tx.Nonce, err = client.Eth().GetNonce(from, ethgo.Latest)
 	if err != nil {
 		return "", err
 	}
 
 	// GasLimit
 	if tx.GasLimit == 0 {
-		msg := ethereum.CallMsg{From: from, To: tx.To, Data: tx.Data, Value: nil}
-		if tx.GasLimit, err = ethClient.EstimateGas(ctx, msg); err != nil {
+		msg := &ethgo.CallMsg{
+			From:  from,
+			To:    (*ethgo.Address)(tx.To),
+			Data:  tx.Data,
+			Value: nil,
+		}
+		if tx.GasLimit, err = client.Eth().EstimateGas(msg); err != nil {
 			return "", err
 		}
 	}
 
 	// GasPrice
-	if tx.GasPrice == nil {
-		if tx.GasPrice, err = ethClient.SuggestGasPrice(ctx); err != nil {
+	if tx.GasPrice == 0 {
+		if tx.GasPrice, err = client.Eth().GasPrice(); err != nil {
 			return "", err
 		}
 	}
 
-	rawTx := types.NewTransaction(tx.Nonce, *tx.To, tx.Value, tx.GasLimit, tx.GasPrice, tx.Data)
-
-	signed, err := types.SignTx(rawTx, types.HomesteadSigner{}, privateKey)
+	txn := &ethgo.Transaction{
+		Nonce: tx.Nonce,
+	}
+	signer := wallet.NewEIP155Signer(chainID.Uint64())
+	signedTxn, err := signer.SignTx(txn, key)
 	if err != nil {
 		return "", err
 	}
 
-	if err := ethClient.SendTransaction(ctx, signed); err != nil {
-		return "", fmt.Errorf("%v. %d, %d", err, tx.Nonce, tx.NoncePending)
+	txnRaw, err := signedTxn.MarshalRLPTo(nil)
+	if err != nil {
+		return "", err
 	}
-
-	return signed.Hash().Hex(), nil
+	hash, err := client.Eth().SendRawTransaction(txnRaw)
+	if err != nil {
+		return "", err
+	}
+	return hash.String(), nil
 }
 
 const pathTransactionsHelpSyn = `
